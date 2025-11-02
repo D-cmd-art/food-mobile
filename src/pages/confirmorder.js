@@ -9,18 +9,17 @@ import {
   Alert,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
+import { useNavigation } from '@react-navigation/native';
+import { api } from '../utils/api';
 
-const USER_DATA = {
-  name: 'Jane Doe',
-  address: '123 Delivery St, City, Country',
-  email: 'jane.doe@example.com',
-};
-
-const CART_TOTAL = 1500;
+import { useUserStore } from '../utils/store/userStore';
+import { useCartStore } from '../utils/store/cartStore';
+import { useMapStore } from '../utils/store/mapStore';
+import { useOrder } from '../hooks/useOrder';
 
 const DELIVERY_SLOTS = [
   { label: 'Select Delivery Time', value: '' },
-  { label: 'Within 45  Mins', value: '45 min' },
+  { label: 'Within 45 Mins', value: '45 min' },
   { label: '1 Hour Slot', value: '1_HOUR' },
   { label: '2 Hour Slot', value: '2_HOUR' },
 ];
@@ -51,31 +50,104 @@ export default function ConfirmOrder() {
   const [deliveryTime, setDeliveryTime] = useState(DELIVERY_SLOTS[0].value);
   const [phone, setPhone] = useState('');
 
-  const handleConfirmOrder = () => {
+  const { mutate } = useOrder();
+  const navigation = useNavigation();
+  const user = useUserStore((state) => state.user);
+  const items = useCartStore((state) => state.items);
+  const clearCart = useCartStore((state) => state.clearCart);
+  const location = useMapStore((state) => state.location);
+
+  const CART_TOTAL = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
+  const createOrderPayload = () => {
     if (!deliveryTime) {
       Alert.alert('Missing Info', 'Please select a delivery time slot.');
-      return;
+      return null;
     }
 
     if (!phone) {
       Alert.alert('Missing Info', 'Please enter a delivery phone number.');
-      return;
+      return null;
     }
 
-    const orderData = {
-      user: USER_DATA,
-      phone,
-      total: CART_TOTAL,
-      paymentMethod,
-      deliveryTime,
-    };
-    
+    const products = items.map((item) => ({
+      productId: item._id,
+      quantity: item.quantity,
+    }));
 
-    console.log('Order Confirmed:', orderData);
-    Alert.alert(
-      'Order Confirmed! 🎉',
-      `Your order total is Rs. ${CART_TOTAL}. Payment: ${paymentMethod}. Delivery time: ${deliveryTime}. Delivery Phone: ${phone}`
-    );
+    return {
+      user: {
+        name: user.name,
+        id: user.id,
+        phone,
+        email: user.email,
+      },
+      location: {
+        name: location.address,
+        lat: location.latitude,
+        lng: location.longitude,
+      },
+      totalPayment: parseFloat(CART_TOTAL),
+      products,
+      status: paymentMethod === 'cashondelivery' ? 'unpaid' : 'pending',
+      deliveryNumber: phone,
+      payment_method: paymentMethod,
+    };
+  };
+
+  const handleConfirmOrder = async () => {
+    const payload = createOrderPayload();
+    if (!payload) return;
+
+    // 🪙 Step 1: Always create the order first
+    mutate(payload, {
+      onSuccess: async (orderResponse) => {
+        const orderId = orderResponse?.data?._id || 'order-' + Date.now();
+
+        // ✅ CASE 1: Cash on Delivery
+        if (paymentMethod === 'cashondelivery') {
+          Alert.alert('Order Placed', 'Your order has been placed successfully!');
+          clearCart();
+          navigation.navigate('Tabs');
+          return;
+        }
+
+        // ✅ CASE 2: Khalti Payment
+        try {
+          const khaltiPayload = {
+            return_url: 'myapp://payment-success', // Replace with your deep link
+            website_url: 'https://example.com', // Your website or Firebase Dynamic Link
+            amount: Math.round(CART_TOTAL * 100), // convert to paisa
+            purchase_order_id: orderId,
+            purchase_order_name: 'Food Order',
+          };
+
+          const response = await api.post('/api/khalti/initiate', khaltiPayload);
+          const { payment_url, pidx } = response.data.data;
+
+          navigation.navigate('PaymentWebView', {
+            paymentUrl: payment_url,
+            onSuccess: async () => {
+              try {
+                // Verify payment after success
+                await api.post('/api/khalti/verify', { pidx });
+                Alert.alert('Success', 'Payment verified and order confirmed!');
+                clearCart();
+                navigation.replace('PaymentSuccess');
+              } catch (verifyErr) {
+                Alert.alert('Payment Verification Failed', 'Please contact support.');
+              }
+            },
+          });
+        } catch (error) {
+          console.error(error);
+          Alert.alert('Error', 'Failed to initiate Khalti payment.');
+        }
+      },
+      onError: () => {
+        Alert.alert('Order Failed', 'There was an issue placing your order.');
+      },
+    });
   };
 
   return (
@@ -83,23 +155,20 @@ export default function ConfirmOrder() {
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <Text style={styles.header}>Confirm Your Order</Text>
 
-        {/* --- 1. User Details --- */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>User Information</Text>
-          <DetailRow label="Name:" value={USER_DATA.name} />
-          <DetailRow label="Email:" value={USER_DATA.email} />
+          <DetailRow label="Name:" value={user.name} />
+          <DetailRow label="Email:" value={user.email} />
         </View>
 
-        {/* --- 2. Delivery Address --- */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Delivery Address</Text>
-          <Text style={styles.addressText}>{USER_DATA.address}</Text>
+          <Text style={styles.addressText}>{location.address}</Text>
           <TouchableOpacity style={styles.changeButton}>
             <Text style={styles.changeButtonText}>Change Address</Text>
           </TouchableOpacity>
         </View>
 
-        {/* --- 3. Delivery Phone Number --- */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Delivery Phone Number</Text>
           <TextInput
@@ -111,10 +180,9 @@ export default function ConfirmOrder() {
           />
         </View>
 
-        {/* --- 4. Payment Method --- */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Payment Method</Text>
-          {PAYMENT_OPTIONS.map(option => (
+          {PAYMENT_OPTIONS.map((option) => (
             <RadioOption
               key={option.key}
               label={option.label}
@@ -124,7 +192,6 @@ export default function ConfirmOrder() {
           ))}
         </View>
 
-        {/* --- 5. Delivery Time --- */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Select Delivery Time</Text>
           <View style={styles.pickerContainer}>
@@ -141,16 +208,16 @@ export default function ConfirmOrder() {
           </View>
         </View>
 
-        {/* --- 6. Total Amount --- */}
         <View style={styles.totalBox}>
           <Text style={styles.totalText}>Order Total:</Text>
           <Text style={styles.totalAmount}>Rs. {CART_TOTAL.toFixed(2)}</Text>
         </View>
       </ScrollView>
 
-      {/* --- CONFIRM BUTTON --- */}
       <TouchableOpacity style={styles.button} onPress={handleConfirmOrder}>
-        <Text style={styles.buttonText}>CONFIRM ORDER</Text>
+        <Text style={styles.buttonText}>
+          {paymentMethod === 'cashondelivery' ? 'CONFIRM ORDER' : 'PAY WITH KHALTI'}
+        </Text>
       </TouchableOpacity>
     </View>
   );
@@ -160,7 +227,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f5f5f5' },
   scrollContent: { padding: 20, paddingBottom: 100 },
   header: { fontSize: 24, fontWeight: 'bold', marginBottom: 20, color: '#333', textAlign: 'center' },
-  section: { backgroundColor: '#fff', borderRadius: 8, padding: 15, marginBottom: 15, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.1, shadowRadius: 2, elevation: 2 },
+  section: { backgroundColor: '#fff', borderRadius: 8, padding: 15, marginBottom: 15, elevation: 2 },
   sectionTitle: { fontSize: 18, fontWeight: '600', marginBottom: 10, color: '#007AFF' },
   detailRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 5, borderBottomWidth: 1, borderBottomColor: '#eee' },
   detailLabel: { fontSize: 14, color: '#666' },
@@ -169,7 +236,7 @@ const styles = StyleSheet.create({
   changeButton: { alignSelf: 'flex-start', marginTop: 5 },
   changeButtonText: { color: '#007AFF', fontWeight: '600', fontSize: 14 },
   radio: { padding: 12, borderWidth: 1, borderColor: '#ccc', borderRadius: 6, marginBottom: 10, backgroundColor: '#fff' },
-  radioSelected: { borderColor: '#007AFF', backgroundColor: '#2ab4ebff', borderWidth: 2 },
+  radioSelected: { borderColor: '#007AFF', backgroundColor: '#cceeff', borderWidth: 2 },
   radioText: { fontSize: 16, fontWeight: '500' },
   pickerContainer: { borderWidth: 1, borderColor: '#f89393ff', borderRadius: 6, overflow: 'hidden' },
   picker: { height: 50, color: '#060708ff', fontWeight: '500', width: '100%' },
