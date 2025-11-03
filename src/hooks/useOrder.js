@@ -10,14 +10,16 @@ export function useOrder(options) {
     ...options,
   });
 }
-// template to send to the backend
-//   const newOrder = new Order({
-//       orderId,
-//       userInfo: body.user, // now a single object
-//       location: body.location,
-//       totalPayment: body.totalPayment,
-//       products: body.products,
-//       deliveryNumber: body.deliveryNumber || body.user.phone || "",
-//       status: body.status || "unpaid",
-//       payment_method: body.payment_method || "cash",
-//     });
+
+
+export function useUserOrders(userId) {
+  return useQuery({
+    queryKey: ["userOrders", userId],
+    queryFn: async () => {
+      if (!userId) return [];  // If no userId, return empty array
+      const res = await api.get(`/orders/user/${userId}`);
+      return res.data.orders;  // Return the orders directly
+    },
+    enabled: !!userId, //  only fetch if userId exists
+  });
+}
