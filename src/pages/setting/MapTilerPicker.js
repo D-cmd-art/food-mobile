@@ -30,9 +30,10 @@ const MapPicker = () => {
 
   const [webReady, setWebReady] = useState(false);
   const [selectedLocation, setSelectedLocation] = useState(defaultLocation);
-  const [currentAddress, setCurrentAddress] = useState('Select a location on the map');
+  const [currentAddress, setCurrentAddress] = useState('Finding your location...');
   const [isGettingAddress, setIsGettingAddress] = useState(false);
-  const [locationLoading, setLocationLoading] = useState(false);
+  const [locationLoading, setLocationLoading] = useState(true); // Start with loading true
+  const [autoLocationFetched, setAutoLocationFetched] = useState(false);
 
   // Send location to WebView
   const sendLocationToWebView = useCallback((lat, lng) => {
@@ -109,12 +110,14 @@ const MapPicker = () => {
   };
 
   // Get current location - FIXED VERSION
-  const getCurrentLocation = async () => {
-    setLocationLoading(true);
+  const getCurrentLocation = async (isAutoFetch = false) => {
+    if (!isAutoFetch) {
+      setLocationLoading(true);
+    }
     setCurrentAddress('Finding your location...');
 
     try {
-      console.log('Starting location fetch...');
+      console.log('Starting location fetch...', isAutoFetch ? '(Auto)' : '(Manual)');
       
       // For Android, request permission first
       if (Platform.OS === 'android') {
@@ -145,28 +148,50 @@ const MapPicker = () => {
           sendLocationToWebView(latitude, longitude);
           getAddressFromCoords(latitude, longitude);
           setLocationLoading(false);
+          if (isAutoFetch) {
+            setAutoLocationFetched(true);
+          }
         },
         (error) => {
           console.log('Geolocation error:', error);
-          handleLocationError(error);
-          setLocationLoading(false);
+          if (isAutoFetch) {
+            // For auto-fetch, don't show alert, just use default location
+            console.log('Auto location fetch failed, using default location');
+            setSelectedLocation(defaultLocation);
+            sendLocationToWebView(defaultLocation.latitude, defaultLocation.longitude);
+            setCurrentAddress('Damak (Default Location)');
+            setLocationLoading(false);
+            setAutoLocationFetched(true);
+          } else {
+            handleLocationError(error);
+            setLocationLoading(false);
+          }
         },
         {
-         enableHighAccuracy: false, // Changed to false for faster response
-            timeout: 30000, // 30 seconds max
-            maximumAge: 300000, 
+          enableHighAccuracy: false, // Changed to false for faster response
+          timeout: 15000, // 15 seconds for auto-fetch
+          maximumAge: 300000, // 5 minutes - accept cached location
           distanceFilter: 10
         }
       );
 
     } catch (error) {
       console.log('Location service error:', error);
-      Alert.alert(
-        'Location Service Unavailable',
-        'Please select your location manually on the map.'
-      );
-      setCurrentAddress('Select location on map');
-      setLocationLoading(false);
+      if (isAutoFetch) {
+        // For auto-fetch, fail silently and use default
+        setSelectedLocation(defaultLocation);
+        sendLocationToWebView(defaultLocation.latitude, defaultLocation.longitude);
+        setCurrentAddress('Damak (Default Location)');
+        setLocationLoading(false);
+        setAutoLocationFetched(true);
+      } else {
+        Alert.alert(
+          'Location Service Unavailable',
+          'Please select your location manually on the map.'
+        );
+        setCurrentAddress('Select location on map');
+        setLocationLoading(false);
+      }
     }
   };
 
@@ -206,6 +231,10 @@ const MapPicker = () => {
       if (data.type === 'mapReady') {
         setWebReady(true);
         console.log('Map is ready');
+        // If we haven't fetched location yet and map is ready, fetch now
+        if (!autoLocationFetched && locationLoading) {
+          getCurrentLocation(true);
+        }
       }
     } catch (e) {
       console.log('WebView message error:', e);
@@ -229,6 +258,19 @@ const MapPicker = () => {
     navigation.goBack();
   };
 
+  // Auto-fetch location when component mounts
+  useEffect(() => {
+    // Start location fetch immediately when component loads
+    getCurrentLocation(true);
+  }, []);
+
+  // Send location to WebView when both are ready
+  useEffect(() => {
+    if (webReady && selectedLocation && autoLocationFetched) {
+      sendLocationToWebView(selectedLocation.latitude, selectedLocation.longitude);
+    }
+  }, [webReady, selectedLocation, autoLocationFetched, sendLocationToWebView]);
+
   const leafletHTML = `
   <!DOCTYPE html>
   <html>
@@ -250,10 +292,34 @@ const MapPicker = () => {
         border: 3px solid white; 
         box-shadow: 0 2px 8px rgba(0,0,0,0.3); 
       }
+      .loading-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(255,255,255,0.9);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+        flex-direction: column;
+      }
+      .loading-text {
+        margin-top: 10px;
+        color: #666;
+        font-family: system-ui;
+      }
     </style>
   </head>
   <body>
     <div id="map"></div>
+    <div id="loadingOverlay" class="loading-overlay">
+      <div style="text-align: center;">
+        <div style="width: 40px; height: 40px; border: 4px solid #f3f3f3; border-top: 4px solid #2f9e44; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto;"></div>
+        <div class="loading-text">Loading map and your location...</div>
+      </div>
+    </div>
     
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
@@ -298,11 +364,16 @@ const MapPicker = () => {
           });
 
           isMapReady = true;
+          
+          // Hide loading overlay
+          document.getElementById('loadingOverlay').style.display = 'none';
+          
           sendToReactNative({ type: 'mapReady' });
           console.log('Map initialized successfully');
           
         } catch (error) {
           console.error('Map error:', error);
+          document.getElementById('loadingOverlay').innerHTML = 'Error loading map';
         }
       }
 
@@ -356,6 +427,16 @@ const MapPicker = () => {
         }
       });
 
+      // Add CSS animation for spinner
+      const style = document.createElement('style');
+      style.textContent = \`
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      \`;
+      document.head.appendChild(style);
+
       // Initialize map
       initMap();
     </script>
@@ -378,52 +459,49 @@ const MapPicker = () => {
       </View>
 
       <View style={styles.addressBar}>
-        <Icon name="map-pin" size={16} color="#2f9e44" />
+        <Icon name="map-pin" size={16} color="#A62A32" />
         <Text style={styles.addressText} numberOfLines={2}>
           {currentAddress}
         </Text>
-        {isGettingAddress && (
-          <ActivityIndicator size="small" color="#2f9e44" style={styles.loadingIndicator} />
+        {(isGettingAddress || locationLoading) && (
+          <ActivityIndicator size="small" color="#A62A32" style={styles.loadingIndicator} />
         )}
       </View>
 
-      <TouchableOpacity 
-        style={[
-          styles.locationButton,
-          locationLoading && styles.locationButtonDisabled
-        ]}
-        onPress={getCurrentLocation}
-        disabled={locationLoading}
-      >
-        <Icon name="crosshair" size={18} color="#fff" />
-        <Text style={styles.locationButtonText}>
-          {locationLoading ? 'Finding Location...' : 'Click here to fetch the current Location'}
-        </Text>
-        {locationLoading && (
-          <ActivityIndicator size="small" color="#fff" style={styles.buttonLoading} />
-        )}
-      </TouchableOpacity>
+      {/* Manual refresh button in case auto-fetch fails */}
+      {!locationLoading && (
+        <TouchableOpacity 
+          style={styles.refreshButton}
+          onPress={() => getCurrentLocation(false)}
+        >
+          <Icon name="refresh-cw" size={16} color="#ffffffff "/>
+          <Text style={styles.refreshButtonText}>
+            Refresh Location
+          </Text>
+        </TouchableOpacity>
+      )}
 
-      <WebView
-        ref={webRef}
-        source={{ html: leafletHTML }}
-        onMessage={handleWebViewMessage}
-        onLoadEnd={() => {
-          console.log('WebView loaded completely');
-          setWebReady(true);
-        }}
-        onError={(error) => console.log('WebView error:', error)}
-        javaScriptEnabled={true}
-        domStorageEnabled={true}
-        startInLoadingState={true}
-        renderLoading={() => (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#2f9e44" />
-            <Text style={styles.loadingText}>Loading Map...</Text>
-          </View>
-        )}
-        style={styles.webview}
-      />
+      {locationLoading ? (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#faf8f9ff" />
+          <Text style={styles.loadingText}>Getting your current location...</Text>
+        </View>
+      ) : (
+        <WebView
+          ref={webRef}
+          source={{ html: leafletHTML }}
+          onMessage={handleWebViewMessage}
+          onLoadEnd={() => {
+            console.log('WebView loaded completely');
+            setWebReady(true);
+          }}
+          onError={(error) => console.log('WebView error:', error)}
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+          startInLoadingState={true}
+          style={styles.webview}
+        />
+      )}
     </SafeAreaView>
   );
 };
@@ -451,7 +529,7 @@ const styles = StyleSheet.create({
     color: '#333' 
   },
   saveBtn: { 
-    backgroundColor: '#2f9e44', 
+    backgroundColor: '#A62A32', 
     paddingHorizontal: 16, 
     paddingVertical: 8, 
     borderRadius: 6 
@@ -479,37 +557,29 @@ const styles = StyleSheet.create({
   loadingIndicator: {
     marginLeft: 8
   },
-  locationButton: {
+  refreshButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#1971c2',
+    backgroundColor: '#e3f2fd',
     margin: 16,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#A32A32',
   },
-  locationButtonDisabled: {
-    backgroundColor: '#868e96',
-  },
-  locationButtonText: {
-    color: '#fff',
+  refreshButtonText: {
+    color: '#A62A32',
     fontWeight: '600',
-    fontSize: 16,
-    marginLeft: 8,
-  },
-  buttonLoading: {
+    fontSize: 14,
     marginLeft: 8,
   },
   loadingContainer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.9)',
+    backgroundColor: '#ffffffff',
   },
   loadingText: {
     marginTop: 12,
