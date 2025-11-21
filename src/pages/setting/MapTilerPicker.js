@@ -2,648 +2,523 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
-  StyleSheet,
-  TouchableOpacity,
   Text,
-  Alert,
+  TouchableOpacity,
+  StyleSheet,
   Dimensions,
+  Alert,
   ActivityIndicator,
+  Platform,
+  PermissionsAndroid,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import Icon from 'react-native-vector-icons/Feather';
 import { useNavigation } from '@react-navigation/native';
-import Geolocation from '@react-native-community/geolocation';
 import { useMapStore } from '../../utils/store/mapStore';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+// CORRECT GEOLOCATION IMPORT
+import Geolocation from '@react-native-community/geolocation';
 
 const { width, height } = Dimensions.get('window');
-
-// Default location as fallback
-const defaultLocation = { latitude: 26.6717, longitude:87.6680 }; // Kathmandu
+const defaultLocation = { latitude: 26.664578, longitude: 87.693876 }; // Damak
 
 const MapPicker = () => {
   const navigation = useNavigation();
   const webRef = useRef(null);
-  
-  // Use the store
   const { setLocation } = useMapStore();
-  
+
   const [webReady, setWebReady] = useState(false);
-  const [selectedLocation, setSelectedLocation] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [currentAddress, setCurrentAddress] = useState('Fetching location...');
+  const [selectedLocation, setSelectedLocation] = useState(defaultLocation);
+  const [currentAddress, setCurrentAddress] = useState('Select a location on the map');
   const [isGettingAddress, setIsGettingAddress] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
-
-  // Debounce function
-  const debounce = (func, wait) => {
-    let timeout;
-    return function executedFunction(...args) {
-      const later = () => {
-        clearTimeout(timeout);
-        func(...args);
-      };
-      clearTimeout(timeout);
-      timeout = setTimeout(later, wait);
-    };
-  };
-
-  // Optimized Leaflet HTML
-  const leafletHTML = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <style>
-    html, body { margin: 0; height: 100%; }
-    #map { width: 100%; height: 100%; }
-    .location-marker {
-      background: #2f9e44;
-      border-radius: 50%;
-      width: 24px;
-      height: 24px;
-      border: 3px solid white;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-      cursor: move;
-    }
-    .location-popup {
-      font-family: Arial, sans-serif;
-      font-size: 14px;
-      text-align: center;
-    }
-    .loading {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      z-index: 1000;
-      background: white;
-      padding: 20px;
-      border-radius: 8px;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-      text-align: center;
-    }
-    .drag-hint {
-      position: absolute;
-      top: 10px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(255,255,255,0.9);
-      padding: 8px 12px;
-      border-radius: 6px;
-      font-size: 12px;
-      z-index: 1000;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-    }
-  </style>
-</head>
-<body>
-  <div id="map"></div>
-  <div id="loading" class="loading">📍 Finding your location...</div>
-  <div id="dragHint" class="drag-hint" style="display: none;">🎯 Drag marker to adjust location</div>
-  
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script>
-    let map, marker;
-    let currentLocation = null;
-    let isDragging = false;
-    let dragEndTimeout;
-    
-    function initMap(lat, lng) {
-      const loading = document.getElementById('loading');
-      const dragHint = document.getElementById('dragHint');
-      if (loading) loading.style.display = 'none';
-      
-      map = L.map('map').setView([lat, lng], 16);
-      
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors'
-      }).addTo(map);
-      
-      // Create marker with better drag handling
-      marker = L.marker([lat, lng], { 
-        draggable: true,
-        icon: L.divIcon({
-          className: 'location-marker',
-          iconSize: [24, 24]
-        }),
-        autoPan: true
-      }).addTo(map);
-      
-      currentLocation = { lat: lat, lng: lng };
-      updatePopup();
-      
-      // Show drag hint briefly
-      if (dragHint) {
-        dragHint.style.display = 'block';
-        setTimeout(() => {
-          dragHint.style.display = 'none';
-        }, 3000);
-      }
-      
-      // DRAG START - set flag
-      marker.on('dragstart', function(event) {
-        isDragging = true;
-        sendDragStatus(true);
-      });
-      
-      // DRAG - throttle updates during drag
-      marker.on('drag', function(event) {
-        const position = marker.getLatLng();
-        currentLocation = { lat: position.lat, lng: position.lng };
-        updatePopupPosition(position);
-      });
-      
-      // DRAG END - send final position
-      marker.on('dragend', function(event) {
-        isDragging = false;
-        const position = marker.getLatLng();
-        currentLocation = { lat: position.lat, lng: position.lng };
-        updatePopup();
-        
-        if (dragEndTimeout) clearTimeout(dragEndTimeout);
-        
-        dragEndTimeout = setTimeout(() => {
-          sendLocationToApp();
-          sendDragStatus(false);
-        }, 100);
-      });
-      
-      // CLICK on map - move marker
-      map.on('click', function(event) {
-        const { lat, lng } = event.latlng;
-        marker.setLatLng([lat, lng]);
-        currentLocation = { lat, lng };
-        updatePopup();
-        
-        setTimeout(() => {
-          sendLocationToApp();
-        }, 50);
-      });
-    }
-    
-    function updatePopup() {
-      const popupContent = \`
-        <div class="location-popup">
-          <strong>📍 Your Location</strong><br>
-          Lat: \${currentLocation.lat.toFixed(6)}<br>
-          Lng: \${currentLocation.lng.toFixed(6)}<br>
-          <small>Drag to adjust position</small>
-        </div>
-      \`;
-      marker.bindPopup(popupContent).openPopup();
-    }
-    
-    function updatePopupPosition(position) {
-      const popupContent = \`
-        <div class="location-popup">
-          <strong>📍 Your Location</strong><br>
-          Lat: \${position.lat.toFixed(6)}<br>
-          Lng: \${position.lng.toFixed(6)}<br>
-          <small>Dragging...</small>
-        </div>
-      \`;
-      marker.bindPopup(popupContent).openPopup();
-    }
-    
-    function sendLocationToApp() {
-      if (window.ReactNativeWebView && currentLocation) {
-        window.ReactNativeWebView.postMessage(
-          JSON.stringify({
-            type: 'locationSelected',
-            latitude: currentLocation.lat,
-            longitude: currentLocation.lng
-          })
-        );
-      }
-    }
-    
-    function sendDragStatus(dragging) {
-      if (window.ReactNativeWebView) {
-        window.ReactNativeWebView.postMessage(
-          JSON.stringify({
-            type: 'dragStatus',
-            isDragging: dragging
-          })
-        );
-      }
-    }
-    
-    // Handle messages from React Native
-    document.addEventListener('message', (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.type === 'setCurrentLocation') {
-          const { lat, lng } = data;
-          if (!map) {
-            initMap(lat, lng);
-          } else if (!isDragging) {
-            marker.setLatLng([lat, lng]);
-            map.setView([lat, lng]);
-            currentLocation = { lat, lng };
-            updatePopup();
-          }
-        }
-      } catch(err) {
-        console.log('Error parsing message:', err);
-      }
-    });
-    
-    // Initialize with default location first
-    initMap(${defaultLocation.latitude}, ${defaultLocation.longitude});
-  </script>
-</body>
-</html>
-`;
-
-  // Debounced address fetching with useCallback
-  const debouncedGetAddress = useCallback(
-    debounce(async (lat, lng) => {
-      setIsGettingAddress(true);
-      try {
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`,
-          {
-            headers: {
-              'User-Agent': 'YourAppName/1.0',
-              'Accept-Language': 'en',
-            },
-          }
-        );
-        
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        
-        const data = await response.json();
-        
-        if (data && data.address) {
-          const address = data.address;
-          let locationName = '';
-          
-          // Build address from available components
-          if (address.road) locationName = address.road;
-          if (address.suburb) locationName = locationName ? `${locationName}, ${address.suburb}` : address.suburb;
-          if (address.city) locationName = locationName ? `${locationName}, ${address.city}` : address.city;
-          if (address.town) locationName = locationName ? `${locationName}, ${address.town}` : address.town;
-          if (address.village) locationName = locationName ? `${locationName}, ${address.village}` : address.village;
-          if (address.state) locationName = locationName ? `${locationName}, ${address.state}` : address.state;
-          if (address.country) locationName = locationName ? `${locationName}, ${address.country}` : address.country;
-          
-          const finalAddress = locationName || data.display_name || 'Unknown Location';
-          setCurrentAddress(finalAddress);
-        } else {
-          setCurrentAddress(data.display_name || 'Location selected');
-        }
-      } catch (error) {
-        console.log('Geocoding failed:', error);
-        setCurrentAddress('Location selected');
-      } finally {
-        setIsGettingAddress(false);
-      }
-    }, 500),
-    []
-  );
-
-  // Get current location
-  const getCurrentLocation = useCallback(() => {
-    console.log('Getting current location...');
-    setLoading(true);
-    
-    Geolocation.getCurrentPosition(
-      (position) => {
-        const { latitude, longitude } = position.coords;
-        console.log('Current location found:', latitude, longitude);
-        
-        setSelectedLocation({ latitude, longitude });
-        sendLocationToWebView(latitude, longitude);
-        setLoading(false);
-        
-        // Get address for the location
-        debouncedGetAddress(latitude, longitude);
-      },
-      (error) => {
-        console.log('Location error:', error);
-        
-        // Use default location
-        setSelectedLocation(defaultLocation);
-        sendLocationToWebView(defaultLocation.latitude, defaultLocation.longitude);
-        setLoading(false);
-        setCurrentAddress('Damak');
-        
-        let errorMessage = 'Using default location. Drag the marker to your actual position.';
-        
-        switch (error.code) {
-          case error.PERMISSION_DENIED:
-            errorMessage = 'Location permission denied. Using default location.';
-            break;
-          case error.POSITION_UNAVAILABLE:
-            errorMessage = 'Location unavailable. Using default location.';
-            break;
-          
-        }
-        
-        Alert.alert('Location Service', errorMessage, [{ text: 'OK' }]);
-      },
-      { 
-        enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 60000
-      }
-    );
-  }, [debouncedGetAddress]);
+  const [locationLoading, setLocationLoading] = useState(false);
 
   // Send location to WebView
   const sendLocationToWebView = useCallback((lat, lng) => {
-    if (webRef.current && webReady && !isDragging) {
-      webRef.current.postMessage(
-        JSON.stringify({ 
-          type: 'setCurrentLocation', 
-          lat, 
-          lng 
-        })
-      );
+    if (webRef.current && webReady) {
+      setTimeout(() => {
+        try {
+          const message = JSON.stringify({ 
+            type: 'setCurrentLocation', 
+            lat, 
+            lng 
+          });
+          webRef.current.postMessage(message);
+          console.log('Location sent to WebView:', lat, lng);
+        } catch (e) {
+          console.log('WebView error:', e);
+        }
+      }, 500);
     }
-  }, [webReady, isDragging]);
+  }, [webReady]);
 
-  // Handle messages from WebView
-  const handleWebViewMessage = useCallback((event) => {
+  // Get address from coordinates
+  const getAddressFromCoords = async (lat, lng) => {
+    setIsGettingAddress(true);
     try {
-      const data = JSON.parse(event.nativeEvent.data);
+      const response = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lng}&localityLanguage=en`
+      );
       
-      if (data.type === 'locationSelected') {
-        const newLocation = {
-          latitude: data.latitude,
-          longitude: data.longitude
-        };
-        setSelectedLocation(newLocation);
-        
-        // Get address for new location when marker is moved
-        debouncedGetAddress(data.latitude, data.longitude);
-      }
-      
-      if (data.type === 'dragStatus') {
-        setIsDragging(data.isDragging);
+      if (response.ok) {
+        const data = await response.json();
+        const address = data.locality || data.city || data.principalSubdivision || 'Unknown location';
+        setCurrentAddress(address);
+      } else {
+        setCurrentAddress(`Location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
       }
     } catch (error) {
-      console.log('Error parsing WebView message:', error);
+      // Fallback to OpenStreetMap
+      try {
+        const response = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18`
+        );
+        if (response.ok) {
+          const data = await response.json();
+          setCurrentAddress(data.display_name || `Location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+        } else {
+          setCurrentAddress(`Location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+        }
+      } catch {
+        setCurrentAddress(`Location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+      }
+    } finally {
+      setIsGettingAddress(false);
     }
-  }, [debouncedGetAddress]);
+  };
 
-  // Handle set location with navigation guard
-  const handleSetLocation = useCallback(() => {
+  // Request Android permission
+  const requestAndroidPermission = async () => {
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        {
+          title: 'Location Permission',
+          message: 'This app needs access to your location to show your current position.',
+          buttonNeutral: 'Ask Me Later',
+          buttonNegative: 'Cancel',
+          buttonPositive: 'OK',
+        }
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch (err) {
+      console.warn('Permission error:', err);
+      return false;
+    }
+  };
+
+  // Get current location - FIXED VERSION
+  const getCurrentLocation = async () => {
+    setLocationLoading(true);
+    setCurrentAddress('Finding your location...');
+
+    try {
+      console.log('Starting location fetch...');
+      
+      // For Android, request permission first
+      if (Platform.OS === 'android') {
+        console.log('Requesting Android location permission...');
+        const hasPermission = await requestAndroidPermission();
+        if (!hasPermission) {
+          Alert.alert(
+            'Permission Required',
+            'Location permission is required to get your current location.'
+          );
+          setLocationLoading(false);
+          setCurrentAddress('Permission denied - select location manually');
+          return;
+        }
+        console.log('Android location permission granted');
+      }
+
+      // Use Geolocation directly - IT'S NOW PROPERLY IMPORTED
+      console.log('Calling Geolocation.getCurrentPosition...');
+      
+      Geolocation.getCurrentPosition(
+        (position) => {
+          console.log('Location success:', position);
+          const { latitude, longitude } = position.coords;
+          console.log('Got coordinates:', latitude, longitude);
+          
+          setSelectedLocation({ latitude, longitude });
+          sendLocationToWebView(latitude, longitude);
+          getAddressFromCoords(latitude, longitude);
+          setLocationLoading(false);
+        },
+        (error) => {
+          console.log('Geolocation error:', error);
+          handleLocationError(error);
+          setLocationLoading(false);
+        },
+        {
+         enableHighAccuracy: false, // Changed to false for faster response
+            timeout: 30000, // 30 seconds max
+            maximumAge: 300000, 
+          distanceFilter: 10
+        }
+      );
+
+    } catch (error) {
+      console.log('Location service error:', error);
+      Alert.alert(
+        'Location Service Unavailable',
+        'Please select your location manually on the map.'
+      );
+      setCurrentAddress('Select location on map');
+      setLocationLoading(false);
+    }
+  };
+
+  const handleLocationError = (error) => {
+    let errorMessage = 'Unable to get your current location. ';
+    
+    switch (error.code) {
+      case error.PERMISSION_DENIED:
+        errorMessage += 'Location permission was denied.';
+        break;
+      case error.POSITION_UNAVAILABLE:
+        errorMessage += 'Location information is unavailable.';
+        break;
+      case error.TIMEOUT:
+        errorMessage += 'Location request timed out.';
+        break;
+      default:
+        errorMessage += 'Please try again or select manually.';
+    }
+    
+    Alert.alert('Location Error', errorMessage);
+    setCurrentAddress('Please select location on map');
+  };
+
+  // Handle WebView messages
+  const handleWebViewMessage = (event) => {
+    try {
+      const data = JSON.parse(event.nativeEvent.data);
+      console.log('WebView message:', data);
+      
+      if (data.type === 'locationSelected') {
+        const newLoc = { latitude: data.latitude, longitude: data.longitude };
+        setSelectedLocation(newLoc);
+        getAddressFromCoords(data.latitude, data.longitude);
+      }
+
+      if (data.type === 'mapReady') {
+        setWebReady(true);
+        console.log('Map is ready');
+      }
+    } catch (e) {
+      console.log('WebView message error:', e);
+    }
+  };
+
+  // Save location
+  const handleSetLocation = () => {
     if (!selectedLocation) {
-      Alert.alert('Location Not Ready', 'Please wait while we get your location...');
+      Alert.alert('Please select a location first');
       return;
     }
-
-    // Save to Zustand store
-    const locationData = {
-      latitude: selectedLocation.latitude,
-      longitude: selectedLocation.longitude,
+    
+    setLocation({
+      ...selectedLocation,
       address: currentAddress,
-      timestamp: new Date().toISOString()
-    };
+      timestamp: new Date().toISOString(),
+    });
     
-    setLocation(locationData);
-    
-    // Use setTimeout to ensure navigation happens after current render cycle
-    setTimeout(() => {
-      navigation.goBack();
-    }, 0);
-    
-    // Show success message
-    Alert.alert(
-      'Location Saved', 
-      'Your location has been saved successfully!',
-      [{ text: 'OK' }]
-    );
-  }, [selectedLocation, currentAddress, setLocation, navigation]);
-
-  // Retry location
-  const handleRetryLocation = useCallback(() => {
-    setLoading(true);
-    setCurrentAddress('Fetching location...');
-    getCurrentLocation();
-  }, [getCurrentLocation]);
-
-  // Get location when component mounts - FIXED: added proper dependencies
-  useEffect(() => {
-    getCurrentLocation();
-  }, [getCurrentLocation]);
-
-  // Send location when WebView is ready - FIXED: added proper dependencies
-  useEffect(() => {
-    if (webReady && selectedLocation && !isDragging) {
-      sendLocationToWebView(selectedLocation.latitude, selectedLocation.longitude);
-    }
-  }, [webReady, selectedLocation, isDragging, sendLocationToWebView]);
-
-  // Handle back button press
-  const handleBackPress = useCallback(() => {
+    Alert.alert('Success', 'Location saved successfully!');
     navigation.goBack();
-  }, [navigation]);
+  };
+
+  const leafletHTML = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body, #map { 
+        height: 100%; 
+        width: 100%; 
+      }
+      .location-marker { 
+        background: #2f9e44; 
+        border-radius: 50%; 
+        width: 20px; 
+        height: 20px; 
+        border: 3px solid white; 
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3); 
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+      let map, marker;
+      let isMapReady = false;
+
+      function initMap() {
+        try {
+          console.log('Initializing map...');
+          
+          map = L.map('map').setView([${defaultLocation.latitude}, ${defaultLocation.longitude}], 13);
+          
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap',
+            maxZoom: 19
+          }).addTo(map);
+          
+          marker = L.marker([${defaultLocation.latitude}, ${defaultLocation.longitude}], { 
+            draggable: true,
+            icon: L.divIcon({ 
+              className: 'location-marker',
+              iconSize: [26, 26]
+            }) 
+          }).addTo(map);
+          
+          marker.on('dragend', function() {
+            const pos = marker.getLatLng();
+            sendToReactNative({
+              type: 'locationSelected',
+              latitude: pos.lat,
+              longitude: pos.lng
+            });
+          });
+
+          map.on('click', function(e) {
+            marker.setLatLng(e.latlng);
+            sendToReactNative({
+              type: 'locationSelected',
+              latitude: e.latlng.lat,
+              longitude: e.latlng.lng
+            });
+          });
+
+          isMapReady = true;
+          sendToReactNative({ type: 'mapReady' });
+          console.log('Map initialized successfully');
+          
+        } catch (error) {
+          console.error('Map error:', error);
+        }
+      }
+
+      function setCurrentLocation(lat, lng) {
+        if (!isMapReady) {
+          console.log('Map not ready yet');
+          return;
+        }
+        
+        try {
+          console.log('Setting location in map:', lat, lng);
+          marker.setLatLng([lat, lng]);
+          map.setView([lat, lng], 15);
+        } catch (error) {
+          console.error('Error setting location:', error);
+        }
+      }
+
+      function sendToReactNative(message) {
+        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+          window.ReactNativeWebView.postMessage(JSON.stringify(message));
+        } else {
+          console.log('ReactNativeWebView not available');
+        }
+      }
+
+      // Handle messages from React Native
+      document.addEventListener('message', function(e) {
+        try {
+          const message = JSON.parse(e.data);
+          console.log('Received message from RN:', message);
+          
+          if (message.type === 'setCurrentLocation') {
+            setCurrentLocation(message.lat, message.lng);
+          }
+        } catch (error) {
+          console.error('Message error:', error);
+        }
+      });
+
+      window.addEventListener('message', function(e) {
+        try {
+          const message = JSON.parse(e.data);
+          console.log('Received window message:', message);
+          
+          if (message.type === 'setCurrentLocation') {
+            setCurrentLocation(message.lat, message.lng);
+          }
+        } catch (error) {
+          console.error('Window message error:', error);
+        }
+      });
+
+      // Initialize map
+      initMap();
+    </script>
+  </body>
+  </html>`;
 
   return (
-    <View style={styles.container}>
-      {/* Header */}
+    <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity 
-          style={styles.backButton}
-          onPress={handleBackPress}
-        >
+        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
           <Icon name="arrow-left" size={24} color="#333" />
         </TouchableOpacity>
-        
-        <Text style={styles.headerTitle}>Select Location</Text>
-        
+        <Text style={styles.title}>Select Location</Text>
         <TouchableOpacity 
-          style={[styles.setLocationButton, isDragging && styles.disabledButton]}
+          style={styles.saveBtn} 
           onPress={handleSetLocation}
-          disabled={isDragging}
         >
-          <Text style={styles.setLocationText}>
-            {isDragging ? 'Dragging...' : 'Save Location'}
-          </Text>
+          <Text style={styles.saveText}>Save</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Location Info */}
-      <View style={styles.locationInfo}>
-        <View style={styles.addressContainer}>
-          <Icon name="map-pin" size={16} color="#2f9e44" />
-          <Text style={styles.locationText}>
-            {currentAddress}
-            {isDragging && ' (Dragging...)'}
-          </Text>
-          {isGettingAddress && !isDragging && (
-            <ActivityIndicator size="small" color="#2f9e44" style={styles.addressLoader} />
-          )}
-        </View>
-        
-        {selectedLocation && (
-          <Text style={styles.coordinates}>
-            {selectedLocation.latitude.toFixed(6)}, {selectedLocation.longitude.toFixed(6)}
-          </Text>
+      <View style={styles.addressBar}>
+        <Icon name="map-pin" size={16} color="#2f9e44" />
+        <Text style={styles.addressText} numberOfLines={2}>
+          {currentAddress}
+        </Text>
+        {isGettingAddress && (
+          <ActivityIndicator size="small" color="#2f9e44" style={styles.loadingIndicator} />
         )}
-        
-        {/* Retry Button */}
-        <TouchableOpacity 
-          style={[styles.retryButton, isDragging && styles.disabledButton]} 
-          onPress={handleRetryLocation}
-          disabled={isDragging}
-        >
-          <Icon name="refresh-cw" size={14} color="#495057" />
-          <Text style={styles.retryText}> Refresh Location</Text>
-        </TouchableOpacity>
       </View>
 
-      {/* Loading Indicator */}
-      {loading && (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#2f9e44" />
-          <Text style={styles.loadingText}>Finding your location...</Text>
-        </View>
-      )}
+      <TouchableOpacity 
+        style={[
+          styles.locationButton,
+          locationLoading && styles.locationButtonDisabled
+        ]}
+        onPress={getCurrentLocation}
+        disabled={locationLoading}
+      >
+        <Icon name="crosshair" size={18} color="#fff" />
+        <Text style={styles.locationButtonText}>
+          {locationLoading ? 'Finding Location...' : 'Click here to fetch the current Location'}
+        </Text>
+        {locationLoading && (
+          <ActivityIndicator size="small" color="#fff" style={styles.buttonLoading} />
+        )}
+      </TouchableOpacity>
 
-      {/* Map */}
       <WebView
         ref={webRef}
         source={{ html: leafletHTML }}
-        style={styles.webview}
-        javaScriptEnabled={true}
-        originWhitelist={['*']}
-        domStorageEnabled={true}
-        onLoadEnd={() => setWebReady(true)}
         onMessage={handleWebViewMessage}
-        onError={(error) => {
-          console.error('WebView error:', error);
-          setLoading(false);
+        onLoadEnd={() => {
+          console.log('WebView loaded completely');
+          setWebReady(true);
         }}
+        onError={(error) => console.log('WebView error:', error)}
+        javaScriptEnabled={true}
+        domStorageEnabled={true}
+        startInLoadingState={true}
+        renderLoading={() => (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#2f9e44" />
+            <Text style={styles.loadingText}>Loading Map...</Text>
+          </View>
+        )}
+        style={styles.webview}
       />
-
-      {/* Instructions */}
-      <View style={styles.instructions}>
-        <Text style={styles.instructionsText}>
-          {isDragging ? '🎯 Releasing marker...' : '✅ Drag the marker to adjust your exact position'}
-        </Text>
-      </View>
-    </View>
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
+  container: { 
+    flex: 1, 
+    backgroundColor: '#fff' 
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  header: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    alignItems: 'center', 
     paddingHorizontal: 16,
     paddingVertical: 12,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+    borderBottomColor: '#f0f0f0', 
+    borderBottomWidth: 1 
   },
   backButton: {
-    padding: 8,
+    padding: 4,
   },
-  headerTitle: {
-    fontSize: 18,
+  title: { 
+    fontSize: 18, 
+    fontWeight: 'bold', 
+    color: '#333' 
+  },
+  saveBtn: { 
+    backgroundColor: '#2f9e44', 
+    paddingHorizontal: 16, 
+    paddingVertical: 8, 
+    borderRadius: 6 
+  },
+  saveText: { 
+    color: '#fff', 
     fontWeight: 'bold',
-    color: '#333',
+    fontSize: 16
   },
-  setLocationButton: {
-    backgroundColor: '#2f9e44',
+  addressBar: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
     paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 6,
+    paddingVertical: 12,
+    borderBottomColor: '#e9ecef',
+    borderBottomWidth: 1
   },
-  disabledButton: {
-    backgroundColor: '#ccc',
-    opacity: 0.7,
-  },
-  setLocationText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  locationInfo: {
-    backgroundColor: '#e8f5e8',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#2f9e44',
-  },
-  addressContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  locationText: {
-    fontSize: 16,
-    color: '#2d5a2d',
-    fontWeight: '600',
-    marginLeft: 8,
-    flex: 1,
-  },
-  addressLoader: {
-    marginLeft: 8,
-  },
-  coordinates: {
-    fontSize: 12,
-    color: '#666',
-    fontFamily: 'monospace',
-    marginBottom: 12,
-  },
-  retryButton: {
-    flexDirection: 'row',
-    alignSelf: 'flex-start',
-    alignItems: 'center',
-    backgroundColor: '#f8f9fa',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: '#dee2e6',
-  },
-  retryText: {
-    fontSize: 12,
-    color: '#495057',
+  addressText: { 
+    flex: 1, 
+    marginLeft: 8, 
+    color: '#495057', 
     fontWeight: '500',
+    fontSize: 14
+  },
+  loadingIndicator: {
+    marginLeft: 8
+  },
+  locationButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1971c2',
+    margin: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  locationButtonDisabled: {
+    backgroundColor: '#868e96',
+  },
+  locationButtonText: {
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 16,
+    marginLeft: 8,
+  },
+  buttonLoading: {
+    marginLeft: 8,
   },
   loadingContainer: {
     position: 'absolute',
-    top: '50%',
-    left: '50%',
-    transform: [{ translateX: -50 }, { translateY: -50 }],
-    zIndex: 1000,
-    backgroundColor: 'white',
-    padding: 20,
-    borderRadius: 10,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
     alignItems: 'center',
-    elevation: 5,
+    backgroundColor: 'rgba(255,255,255,0.9)',
   },
   loadingText: {
-    marginTop: 10,
-    fontSize: 14,
-    color: '#333',
+    marginTop: 12,
+    color: '#666',
+    fontSize: 16,
   },
-  webview: {
-    flex: 1,
-    width,
-  },
-  instructions: {
-    padding: 12,
-    backgroundColor: '#f0f9ff',
-    borderTopWidth: 1,
-    borderTopColor: '#bae6fd',
-  },
-  instructionsText: {
-    fontSize: 12,
-    color: '#0369a1',
-    textAlign: 'center',
-    fontWeight: '500',
+  webview: { 
+    flex: 1, 
+    width 
   },
 });
 
